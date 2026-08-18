@@ -292,18 +292,13 @@ public:
   }
 };
 
-class AArch64StackTagging : public FunctionPass {
+class AArch64StackTaggingImpl {
   const bool MergeInit;
   const bool UseStackSafety;
 
 public:
-  static char ID; // Pass ID, replacement for typeid
-
-  AArch64StackTagging(bool IsOptNone = false)
-      : FunctionPass(ID),
-        MergeInit(ClMergeInit.getNumOccurrences() ? ClMergeInit : !IsOptNone),
-        UseStackSafety(ClUseStackSafety.getNumOccurrences() ? ClUseStackSafety
-                                                            : !IsOptNone) {}
+  AArch64StackTaggingImpl(bool MergeInit, bool UseStackSafety)
+      : MergeInit(MergeInit), UseStackSafety(UseStackSafety) {}
 
   void tagAlloca(AllocaInst *AI, Instruction *InsertBefore, Value *Ptr,
                  uint64_t Size);
@@ -316,9 +311,9 @@ public:
       const Module &M,
       const MapVector<AllocaInst *, memtag::AllocaInfo> &Allocas,
       const DominatorTree *DT);
-  bool runOnFunction(Function &F) override;
-
-  StringRef getPassName() const override { return "AArch64 Stack Tagging"; }
+  bool run(Function &Fn, const StackSafetyGlobalInfo *SSI, AAResults *AA,
+           OptimizationRemarkEmitter *ORE, DominatorTree *DT,
+           PostDominatorTree *PDT, LoopInfo *LI);
 
 private:
   Function *F = nullptr;
@@ -326,6 +321,41 @@ private:
   const DataLayout *DL = nullptr;
   AAResults *AA = nullptr;
   const StackSafetyGlobalInfo *SSI = nullptr;
+};
+
+class AArch64StackTaggingLegacy : public FunctionPass {
+  const bool MergeInit;
+  const bool UseStackSafety;
+
+public:
+  static char ID;
+  AArch64StackTaggingLegacy(bool IsOptNone = false)
+      : FunctionPass(ID),
+        MergeInit(ClMergeInit.getNumOccurrences() ? ClMergeInit : !IsOptNone),
+        UseStackSafety(ClUseStackSafety.getNumOccurrences() ? ClUseStackSafety
+                                                            : !IsOptNone) {
+    initializeAArch64StackTaggingLegacyPass(*PassRegistry::getPassRegistry());
+  }
+
+  bool runOnFunction(Function &F) override {
+    if (skipFunction(F))
+      return false;
+    
+    auto *SSI = UseStackSafety ? &getAnalysis<StackSafetyGlobalInfoWrapperPass>().getResult() : nullptr;
+    auto *AA = MergeInit ? &getAnalysis<AAResultsWrapperPass>().getAAResults() : nullptr;
+    auto *OREPass = getAnalysisIfAvailable<OptimizationRemarkEmitterWrapperPass>();
+    auto *ORE = OREPass ? &OREPass->getORE() : nullptr;
+    auto *DTPass = getAnalysisIfAvailable<DominatorTreeWrapperPass>();
+    auto *DT = DTPass ? &DTPass->getDomTree() : nullptr;
+    auto *PDTPass = getAnalysisIfAvailable<PostDominatorTreeWrapperPass>();
+    auto *PDT = PDTPass ? &PDTPass->getPostDomTree() : nullptr;
+    auto *LIPass = getAnalysisIfAvailable<LoopInfoWrapperPass>();
+    auto *LI = LIPass ? &LIPass->getLoopInfo() : nullptr;
+
+    return AArch64StackTaggingImpl(MergeInit, UseStackSafety).run(F, SSI, AA, ORE, DT, PDT, LI);
+  }
+
+  StringRef getPassName() const override { return "AArch64 Stack Tagging"; }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.setPreservesCFG();
@@ -334,26 +364,53 @@ private:
     if (MergeInit)
       AU.addRequired<AAResultsWrapperPass>();
     AU.addUsedIfAvailable<OptimizationRemarkEmitterWrapperPass>();
+    FunctionPass::getAnalysisUsage(AU);
   }
 };
 
 } // end anonymous namespace
 
-char AArch64StackTagging::ID = 0;
+char AArch64StackTaggingLegacy::ID = 0;
 
-INITIALIZE_PASS_BEGIN(AArch64StackTagging, DEBUG_TYPE, "AArch64 Stack Tagging",
+INITIALIZE_PASS_BEGIN(AArch64StackTaggingLegacy, DEBUG_TYPE, "AArch64 Stack Tagging",
                       false, false)
 INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(StackSafetyGlobalInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(OptimizationRemarkEmitterWrapperPass)
-INITIALIZE_PASS_END(AArch64StackTagging, DEBUG_TYPE, "AArch64 Stack Tagging",
+INITIALIZE_PASS_END(AArch64StackTaggingLegacy, DEBUG_TYPE, "AArch64 Stack Tagging",
                     false, false)
 
-FunctionPass *llvm::createAArch64StackTaggingPass(bool IsOptNone) {
-  return new AArch64StackTagging(IsOptNone);
+FunctionPass *llvm::createAArch64StackTaggingLegacyPass(bool IsOptNone) {
+  return new AArch64StackTaggingLegacy(IsOptNone);
 }
 
-Instruction *AArch64StackTagging::collectInitializers(Instruction *StartInst,
+PreservedAnalyses AArch64StackTaggingPass::run(Function &F,
+                                               FunctionAnalysisManager &AM) {
+  bool IsOptNone = F.hasFnAttribute(Attribute::OptimizeNone);
+  bool MergeInit = ClMergeInit.getNumOccurrences() ? ClMergeInit : !IsOptNone;
+  bool UseStackSafety = ClUseStackSafety.getNumOccurrences() ? ClUseStackSafety : !IsOptNone;
+
+  const StackSafetyGlobalInfo *SSI = nullptr;
+  if (UseStackSafety) {
+    auto &MAM = AM.getResult<ModuleAnalysisManagerFunctionProxy>(F).getManager();
+    SSI = &MAM.getResult<StackSafetyGlobalAnalysis>(*F.getParent());
+  }
+
+  auto *AA = MergeInit ? &AM.getResult<AAManager>(F) : nullptr;
+  auto *ORE = &AM.getResult<OptimizationRemarkEmitterAnalysis>(F);
+  auto *DT = &AM.getResult<DominatorTreeAnalysis>(F);
+  auto *PDT = &AM.getResult<PostDominatorTreeAnalysis>(F);
+  auto *LI = &AM.getResult<LoopAnalysis>(F);
+
+  if (AArch64StackTaggingImpl(MergeInit, UseStackSafety).run(F, SSI, AA, ORE, DT, PDT, LI)) {
+    PreservedAnalyses PA;
+    PA.preserveSet<CFGAnalyses>();
+    return PA;
+  }
+  return PreservedAnalyses::all();
+}
+
+Instruction *AArch64StackTaggingImpl::collectInitializers(Instruction *StartInst,
                                                       Value *StartPtr,
                                                       uint64_t Size,
                                                       InitializerBuilder &IB) {
@@ -413,7 +470,7 @@ Instruction *AArch64StackTagging::collectInitializers(Instruction *StartInst,
   return LastInst;
 }
 
-void AArch64StackTagging::tagAlloca(AllocaInst *AI, Instruction *InsertBefore,
+void AArch64StackTaggingImpl::tagAlloca(AllocaInst *AI, Instruction *InsertBefore,
                                     Value *Ptr, uint64_t Size) {
   auto SetTagZeroFunc = Intrinsic::getOrInsertDeclaration(
       F->getParent(), Intrinsic::aarch64_settag_zero);
@@ -434,7 +491,7 @@ void AArch64StackTagging::tagAlloca(AllocaInst *AI, Instruction *InsertBefore,
   IB.generate(IRB);
 }
 
-void AArch64StackTagging::untagAlloca(AllocaInst *AI, Instruction *InsertBefore,
+void AArch64StackTaggingImpl::untagAlloca(AllocaInst *AI, Instruction *InsertBefore,
                                       uint64_t Size) {
   IRBuilder<> IRB(InsertBefore);
   IRB.CreateCall(SetTagFunc, {IRB.CreatePointerCast(AI, IRB.getPtrTy()),
@@ -459,7 +516,7 @@ static Value *getSlotPtr(IRBuilder<> &IRB, const Triple &TargetTriple,
   return nullptr;
 }
 
-Instruction *AArch64StackTagging::insertBaseTaggedPointer(
+Instruction *AArch64StackTaggingImpl::insertBaseTaggedPointer(
     const Module &M,
     const MapVector<AllocaInst *, memtag::AllocaInfo> &AllocasToInstrument,
     const DominatorTree *DT) {
@@ -508,22 +565,18 @@ Instruction *AArch64StackTagging::insertBaseTaggedPointer(
 }
 
 // FIXME: check for MTE extension
-bool AArch64StackTagging::runOnFunction(Function &Fn) {
+bool AArch64StackTaggingImpl::run(Function &Fn, const StackSafetyGlobalInfo *SSI, AAResults *AA,
+                                  OptimizationRemarkEmitter *ORE, DominatorTree *DT,
+                                  PostDominatorTree *PDT, LoopInfo *LI) {
   if (!Fn.hasFnAttribute(Attribute::SanitizeMemTag))
     return false;
 
-  if (UseStackSafety)
-    SSI = &getAnalysis<StackSafetyGlobalInfoWrapperPass>().getResult();
-  F = &Fn;
-  DL = &Fn.getDataLayout();
-  if (MergeInit)
-    AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
+  this->SSI = SSI;
+  this->F = &Fn;
+  this->DL = &Fn.getDataLayout();
+  this->AA = AA;
 
   std::unique_ptr<OptimizationRemarkEmitter> DeleteORE;
-  OptimizationRemarkEmitter *ORE = nullptr;
-  if (auto *P = getAnalysisIfAvailable<OptimizationRemarkEmitterWrapperPass>())
-    ORE = &P->getORE();
-
   if (ORE == nullptr) {
     DeleteORE = std::make_unique<OptimizationRemarkEmitter>(F);
     ORE = DeleteORE.get();
@@ -538,30 +591,19 @@ bool AArch64StackTagging::runOnFunction(Function &Fn) {
     return false;
 
   std::unique_ptr<DominatorTree> DeleteDT;
-  DominatorTree *DT = nullptr;
-  if (auto *P = getAnalysisIfAvailable<DominatorTreeWrapperPass>())
-    DT = &P->getDomTree();
-
   if (DT == nullptr) {
     DeleteDT = std::make_unique<DominatorTree>(*F);
     DT = DeleteDT.get();
   }
 
   std::unique_ptr<PostDominatorTree> DeletePDT;
-  PostDominatorTree *PDT = nullptr;
-  if (auto *P = getAnalysisIfAvailable<PostDominatorTreeWrapperPass>())
-    PDT = &P->getPostDomTree();
-
   if (PDT == nullptr) {
     DeletePDT = std::make_unique<PostDominatorTree>(*F);
     PDT = DeletePDT.get();
   }
 
   std::unique_ptr<LoopInfo> DeleteLI;
-  LoopInfo *LI = nullptr;
-  if (auto *LIWP = getAnalysisIfAvailable<LoopInfoWrapperPass>()) {
-    LI = &LIWP->getLoopInfo();
-  } else {
+  if (LI == nullptr) {
     DeleteLI = std::make_unique<LoopInfo>(*DT);
     LI = DeleteLI.get();
   }

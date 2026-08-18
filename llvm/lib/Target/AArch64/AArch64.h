@@ -18,6 +18,7 @@
 #include "Utils/AArch64BaseInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionAnalysisManager.h"
+#include "llvm/IR/PassManager.h"
 #include "llvm/Pass.h"
 #include "llvm/PassRegistry.h"
 #include "llvm/Support/DataTypes.h"
@@ -135,7 +136,7 @@ FunctionPass *createAArch64PreLegalizerCombiner();
 FunctionPass *createAArch64PostLegalizerCombiner(bool IsOptNone);
 FunctionPass *createAArch64PostLegalizerLowering();
 FunctionPass *createAArch64PostSelectOptimize();
-FunctionPass *createAArch64StackTaggingPass(bool IsOptNone);
+FunctionPass *createAArch64StackTaggingLegacyPass(bool IsOptNone);
 FunctionPass *createAArch64StackTaggingPreRALegacyPass();
 ModulePass *createAArch64Arm64ECCallLoweringPass();
 
@@ -170,7 +171,7 @@ void initializeAArch64RedundantCondBranchLegacyPass(PassRegistry &);
 void initializeAArch64SIMDInstrOptLegacyPass(PassRegistry &);
 void initializeAArch64SLSHardeningLegacyPass(PassRegistry &);
 void initializeAArch64SpeculationHardeningPass(PassRegistry &);
-void initializeAArch64StackTaggingPass(PassRegistry &);
+void initializeAArch64StackTaggingLegacyPass(PassRegistry &);
 void initializeAArch64StackTaggingPreRALegacyPass(PassRegistry &);
 void initializeAArch64StorePairSuppressPass(PassRegistry&);
 void initializeFalkorHWPFFixPass(PassRegistry&);
@@ -181,6 +182,12 @@ void initializeMachineSMEABIPass(PassRegistry &);
 void initializeAArch64SRLTDefineSuperRegsPass(PassRegistry &);
 void initializeSVEIntrinsicOptsPass(PassRegistry &);
 void initializeAArch64Arm64ECCallLoweringPass(PassRegistry &);
+
+class AArch64StackTaggingPass
+    : public OptionalPassInfoMixin<AArch64StackTaggingPass> {
+public:
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
+};
 
 class AArch64StackTaggingPreRAPass
     : public OptionalPassInfoMixin<AArch64StackTaggingPreRAPass> {

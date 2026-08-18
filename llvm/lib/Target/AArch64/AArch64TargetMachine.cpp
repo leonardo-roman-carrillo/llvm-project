@@ -275,7 +275,7 @@ LLVMInitializeAArch64Target() {
   initializeSVEIntrinsicOptsPass(PR);
   initializeAArch64SpeculationHardeningPass(PR);
   initializeAArch64SLSHardeningLegacyPass(PR);
-  initializeAArch64StackTaggingPass(PR);
+  initializeAArch64StackTaggingLegacyPass(PR);
   initializeAArch64StackTaggingPreRALegacyPass(PR);
   initializeAArch64LowerHomogeneousPrologEpilogPass(PR);
   initializeAArch64DAGToDAGISelLegacyPass(PR);
@@ -687,7 +687,7 @@ void AArch64PassConfig::addIRPasses() {
   if (getOptLevel() == CodeGenOptLevel::Aggressive && EnableSelectOpt)
     addPass(createSelectOptimizePass());
 
-  addPass(createAArch64StackTaggingPass(
+  addPass(createAArch64StackTaggingLegacyPass(
       /*IsOptNone=*/TM->getOptLevel() == CodeGenOptLevel::None));
 
   // Match complex arithmetic patterns
